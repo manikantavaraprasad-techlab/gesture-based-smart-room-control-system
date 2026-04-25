@@ -1,87 +1,37 @@
-# 👋 Gesture-Based Smart Room Control System
+# 🏠 Smart Home — Gesture Control + Face Recognition + Gender-Aware Voice (Jarvis HUD)
 
-A real-time computer vision system that allows users to control home appliances like lights and fans using hand gestures with voice feedback.
+A real-time smart room controller with:
 
----
-
-## 🚀 Features
-
-* 👋 Gesture-based control using MediaPipe
-* 💡 Light ON/OFF using palm swipe
-* 🌬️ Fan ON using circular finger motion
-* 👎 Fan OFF using thumb-down gesture
-* 📊 Dynamic brightness and speed control
-* 🔒 Gesture-based system lock/unlock
-* 🎤 Voice feedback for every action
-* 🧠 Auto OFF when no user detected (occupancy detection)
-* ⚡ Real-time processing using OpenCV
+- ✋ **Hand gesture control** (MediaPipe): unlock (horns), light on/off (palm swipe), fan on (index-circle), brightness/speed steps (palm/index up/down), fan off (thumb-down hold)
+- 🧠 **Face detection + gender classification** (OpenCV DNN): detects presence by face, classifies **Male/Female**, and uses **“sir” / “madam”** dynamically
+- 🗣️ **Voice feedback via WebSocket** to a **Jarvis-style HTML visualizer** (local TTS + animated spectrum)
+- 🧯 **Room-empty + auto-lock logic**: 15s warning → 25s auto-off + lock; 14s idle warning → 18s auto-lock
+- 🎛️ **Realistic controls**: PWM-style brightness (gamma-corrected), fan RPM mapping, cooldowns, hysteresis, sensor noise/drift simulation
 
 ---
 
-## 🛠️ Tech Stack
+## 🖥️ Requirements
 
-* Python
-* OpenCV
-* MediaPipe
-* Pyttsx3
-* NumPy
-
----
-
-## 📌 Project Highlights
-
-* Built a real-time gesture-based smart home control system using computer vision to control appliances without physical interaction
-* Implemented robust gesture recognition using MediaPipe and OpenCV for light and fan control, including swipe, rotation, and motion-based adjustments
-* Integrated voice feedback, auto-lock mechanism, and occupancy detection to automatically turn off appliances when no user is present, improving energy efficiency
+- **Python** 3.10+ (tested on 3.11/3.12)
+- **Camera** (built-in or USB)
+- **Windows / macOS / Linux**
+- **Modern browser** (Chrome/Edge recommended) for the visualizer
 
 ---
 
-## ▶️ How to Run
-
-### 1. Clone Repository
+## ⚙️ Installation
 
 ```bash
-git clone https://github.com/manikantavp-techlab/gesture-smart-room-control.git
-cd gesture-smart-room-control
-```
+# 1) Clone the repo
+git clone https://github.com/YOUR_USERNAME/smart-home-gesture.git
+cd smart-home-gesture
 
-### 2. Install Dependencies
+# 2) Create and activate a virtual environment (recommended)
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# macOS/Linux
+source .venv/bin/activate
 
-```bash
+# 3) Install dependencies
 pip install -r requirements.txt
-```
-
-### 3. Run the Project
-
-```bash
-python main.py
-```
-
----
-
-### ⚠️ Requirements
-
-* Webcam (for gesture detection)
-* Python 3.8+
-
----
-
-## 💡 How It Works
-
-* Camera captures hand gestures in real-time
-* MediaPipe detects hand landmarks
-* Gestures are classified (swipe, rotation, thumb-down)
-* System controls appliances accordingly
-* Voice feedback confirms each action
-
----
-
-## 🎥 Demo
-
-*(Add your demo video link here)*
-
----
-
-## 👨‍💻 Author
-
-**Manikanta Vara Prasad**
