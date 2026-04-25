@@ -1,2 +1,65 @@
+# ── Python ────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Unit test / coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+.nox/
+
+# Type checkers / linters
+.mypy_cache/
+.pytype/
+.ruff_cache/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# ── Project-specific ──────────────────────────────────────────────────────
+# Large model files (downloaded automatically; don’t commit)
+models/*.caffemodel
+models/*.prototxt
+
+# Temporary TTS artifacts (Windows fallback)
+_smartroom_speak.vbs
+
+# Local runtime state / camera captures (optional)
+captures/
+*.avi
+*.mp4
+*.jpg
+*.png
+
+# Environment / secrets (if you add any later)
+.env
+.env.*
