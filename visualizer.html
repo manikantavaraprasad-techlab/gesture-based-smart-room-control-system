@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>J.A.R.V.I.S — HUD Voice Visualizer v16</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{
+    width:100%;height:100%;overflow:hidden;
+    background:#000;
+    font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;
+  }
+  canvas{
+    display:block;
+    position:absolute;
+    top:0;left:0;
+    width:100%;height:100%;
+  }
+  #conn{
+    position:fixed;top:16px;right:20px;z-index:10;
+    display:flex;align-items:center;gap:8px;
+    color:rgba(0,200,255,0.4);font-size:11px;letter-spacing:2px;
+    text-transform:uppercase;
+  }
+  #conn-dot{
+    width:7px;height:7px;border-radius:50%;
+    background:#ff3333;box-shadow:0 0 6px #ff3333;
+    transition:all 0.4s;
+  }
+  #conn-dot.on{background:#00ff88;box-shadow:0 0 8px #00ff88}
+  #hint{
+    position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
+    z-index:10;color:rgba(0,200,255,0.25);font-size:11px;
+    letter-spacing:3px;text-transform:uppercase;
+  }
+  #action-display{
+    position:fixed;bottom:70px;left:50%;transform:translateX(-50%);
+    z-index:10;color:rgba(0,230,255,0.9);font-size:22px;
+    font-weight:300;letter-spacing:2px;
+    text-shadow:0 0 25px rgba(0,200,255,0.4);
+    opacity:0;transition:opacity 0.4s ease,transform 0.4s ease;
+    transform:translateX(-50%) translateY(8px);
+    white-space:nowrap;
+  }
+  #action-display.visible{
+    opacity:1;transform:translateX(-50%) translateY(0);
+  }
+  #honorific-badge{
+    position:fixed;top:16px;left:20px;z-index:10;
+    display:flex;align-items:center;gap:8px;
+    font-size:11px;letter-spacing:2px;
+    text-transform:uppercase;
+    transition:color 0.5s;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="hud"></canvas>
+
+<div id="conn">
+  <div id="conn-dot"></div>
+  <span id="conn-label">DISCONNECTED</span>
+</div>
+<div id="honorific-badge" style="color:rgba(0,200,255,0.4)">
+  <span id="hon-icon">◆</span>
+  <span id="hon-label">MODE: SIR</span>
+</div>
+<div id="action-display"></div>
+<div id="hint">CLICK / SPACE TO DEMO &nbsp;·&nbsp; WEBSOCKET ws://localhost:9600</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════
+// CONFIG
+// ═══════════════════════════════════════════════════════════
+const CFG = {
+  wsUrl:        'ws://localhost:9600',
+  reconnectMs:  2500,
+  voiceRate:    1.10,
+  voicePitch:   0.82,
+  voiceVolume:  1.0,
+  preferVoices: ['google uk english male','daniel','microsoft david','male'],
+  actionShowMs: 2800,
+};
+
+// Current honorific — updated from WebSocket messages
+let currentHonorific = 'sir';
+
+// ═══════════════════════════════════════════════════════════
+// CANVAS SETUP
+// ═══════════════════════════════════════════════════════════
+const canvas = document.getElementById('hud');
+const ctx    = canvas.getContext('2d');
+let W, H, CX, CY, R;
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  CX = W / 2;
+  CY = H / 2;
+  R  = Math.min(W, H) * 0.38;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ═══════════════════════════════════════════════════════════
+// VOICE STATE
+// ═══════════════════════════════════════════════════════════
+let isSpeaking   = false;
+let simAmp       = 0;
+let simTarget    = 0;
+const simAttack  = 0.30;
+const simDecay   = 0.93;
+let shockwave    = 0;
+let shockAlpha   = 0;
+
+const NUM_BANDS  = 64;
+const bands      = new Float32Array(NUM_BANDS);
+const bandTarget = new Float32Array(NUM_BANDS);
+
+// Track current utterance to prevent cancel race condition
+let currentUtteranceId = 0;
+
+function updateAudio() {
+  if (simAmp < simTarget) simAmp += (simTarget - simAmp) * simAttack;
+  else simAmp *= simDecay;
+  if (simAmp < 0.003) simAmp = 0;
+
+  const t = performance.now() / 1000;
+  for (let i = 0; i < NUM_BANDS; i++) {
+    if (isSpeaking) {
+      const nx = i / NUM_BANDS;
+      const f1 = Math.exp(-((nx-0.15)**2)/0.007)*0.95;
+      const f2 = Math.exp(-((nx-0.32)**2)/0.010)*0.70;
+      const f3 = Math.exp(-((nx-0.52)**2)/0.016)*0.50;
+      const f4 = Math.exp(-((nx-0.74)**2)/0.022)*0.30;
+      const base = f1+f2+f3+f4;
+      const wobble = 0.65 + 0.35*Math.sin(t*9+i*0.18)*Math.sin(t*14+i*0.09);
+      const jitter = 0.82 + Math.random()*0.18;
+      bandTarget[i] = simAmp * base * wobble * jitter;
+    } else {
+      bandTarget[i] = 0.02 + 0.015*Math.sin(t*1.2 + i*0.15);
+    }
+    bands[i] += (bandTarget[i] - bands[i]) * 0.25;
+  }
+
+  if (shockwave > 0) {
+    shockwave += 0.025;
+    shockAlpha *= 0.96;
+    if (shockwave > 1.5) { shockwave = 0; shockAlpha = 0; }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// SPEECH SYNTHESIS (with utterance tracking)
+// ═══════════════════════════════════════════════════════════
+let chosenVoice = null;
+function loadVoices() {
+  const v = speechSynthesis.getVoices();
+  if (!v.length) return;
+  for (const p of CFG.preferVoices) {
+    const f = v.find(x => x.name.toLowerCase().includes(p));
+    if (f) { chosenVoice = f; break; }
+  }
+  if (!chosenVoice) chosenVoice = v.find(x => x.lang.startsWith('en')) || v[0];
+}
+speechSynthesis.onvoiceschanged = loadVoices;
+loadVoices();
+
+function setSpeaking(on) {
+  isSpeaking = on;
+  if (!on) simTarget = 0;
+}
+
+function speak(text) {
+  if (!text) return;
+  speechSynthesis.cancel();
+
+  const myId = ++currentUtteranceId;
+  const u = new SpeechSynthesisUtterance(text);
+
+  if (chosenVoice) u.voice = chosenVoice;
+  u.rate = CFG.voiceRate;
+  u.pitch = CFG.voicePitch;
+  u.volume = CFG.voiceVolume;
+
+  u.onstart = () => {
+    if (myId !== currentUtteranceId) return; // stale utterance
+    setSpeaking(true);
+    simTarget = 0.85;
+    shockwave = 0.01;
+    shockAlpha = 0.6;
+  };
+  u.onboundary = () => {
+    if (myId !== currentUtteranceId) return;
+    simTarget = 0.45 + Math.random()*0.55;
+  };
+  u.onend = () => {
+    if (myId !== currentUtteranceId) return;
+    setSpeaking(false);
+  };
+  u.onerror = () => {
+    if (myId !== currentUtteranceId) return;
+    setSpeaking(false);
+  };
+  speechSynthesis.speak(u);
+}
+
+// ═══════════════════════════════════════════════════════════
+// HONORIFIC MANAGEMENT
+// ═══════════════════════════════════════════════════════════
+const honIcon  = document.getElementById('hon-icon');
+const honLabel = document.getElementById('hon-label');
+const honBadge = document.getElementById('honorific-badge');
+
+function updateHonorificUI(hon) {
+  hon = (hon || 'sir').toLowerCase();
+  if (hon === currentHonorific) return;
+  currentHonorific = hon;
+
+  if (hon === 'madam') {
+    honLabel.textContent = 'MODE: MADAM';
+    honBadge.style.color = 'rgba(220,150,255,0.6)';
+    honIcon.textContent = '◆';
+  } else {
+    honLabel.textContent = 'MODE: SIR';
+    honBadge.style.color = 'rgba(0,200,255,0.4)';
+    honIcon.textContent = '◆';
+  }
+}
+
+function fmtHonorific(text) {
+  text = text.trim().replace(/[.,!?]+$/,'');
+  const lower = text.toLowerCase();
+  if (lower.endsWith(', sir') || lower.endsWith(', madam')) return text + '.';
+  return text + ', ' + currentHonorific + '.';
+}
+
+// ═══════════════════════════════════════════════════════════
+// ACTION DISPLAY
+// ═══════════════════════════════════════════════════════════
+const actionEl = document.getElementById('action-display');
+let actionTimer = null;
+
+function showAction(actionText, speechText, honorific) {
+  // Update honorific if provided
+  if (honorific) updateHonorificUI(honorific);
+
+  actionEl.textContent = actionText;
+  actionEl.classList.add('visible');
+  clearTimeout(actionTimer);
+  actionTimer = setTimeout(() => actionEl.classList.remove('visible'), CFG.actionShowMs);
+
+  // Speech already has honorific from backend — speak directly
+  speak(speechText || fmtHonorific(actionText));
+}
+
+// ═══════════════════════════════════════════════════════════
+// WEBSOCKET
+// ═══════════════════════════════════════════════════════════
+const connDot = document.getElementById('conn-dot');
+const connLbl = document.getElementById('conn-label');
+let ws = null;
+
+function connectWS() {
+  try { ws = new WebSocket(CFG.wsUrl); }
+  catch(e) { setTimeout(connectWS, CFG.reconnectMs); return; }
+
+  ws.onopen = () => {
+    connDot.classList.add('on');
+    connLbl.textContent='CONNECTED';
+  };
+
+  ws.onmessage = evt => {
+    try {
+      const m = JSON.parse(evt.data);
+      const action   = m.action || m.text || '';
+      const speech   = m.speech || m.voice || m.action || '';
+      const honorific = m.honorific || null;
+      showAction(action, speech, honorific);
+    } catch(e) {
+      // Fallback: don't read raw JSON aloud
+      console.warn('WS parse error:', e);
+    }
+  };
+
+  ws.onclose = () => {
+    connDot.classList.remove('on');
+    connLbl.textContent='DISCONNECTED';
+    setTimeout(connectWS, CFG.reconnectMs);
+  };
+  ws.onerror = () => ws.close();
+}
+connectWS();
+
+// ═══════════════════════════════════════════════════════════
+// DEMO
+// ═══════════════════════════════════════════════════════════
+const DEMOS = [
+  {action:'System Unlocked',        speech:'System unlocked. Welcome, sir.',     hon:'sir'},
+  {action:'Light: ON',              speech:'Light on, sir.',                       hon:'sir'},
+  {action:'Fan: ON',                speech:'Fan on, sir.',                         hon:'sir'},
+  {action:'Brightness: 60%',        speech:'Brightness 60 percent, sir.',         hon:'sir'},
+  // Switch to madam demo
+  {action:'Gender: Female',         speech:'Welcome, madam. System ready.',       hon:'madam'},
+  {action:'Speed: 80%',             speech:'Fan speed 80 percent, madam.',        hon:'madam'},
+  {action:'Fan: OFF',               speech:'Fan off, madam.',                      hon:'madam'},
+  {action:'Light: OFF',             speech:'Light off, madam.',                    hon:'madam'},
+  {action:'Room Empty — All OFF',   speech:'Room is empty. All devices turned off.', hon:'sir'},
+  {action:'Welcome Back',           speech:'Welcome back, sir. System ready.',    hon:'sir'},
+  {action:'System Locked',          speech:'System locked, sir.',                  hon:'sir'},
+];
+let di = 0;
+
+function runDemo() {
+  const d = DEMOS[di % DEMOS.length];
+  showAction(d.action, d.speech, d.hon);
+  di++;
+}
+
+document.addEventListener('click', runDemo);
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); runDemo(); }
+});
+
+// ═══════════════════════════════════════════════════════════
+// PARTICLES
+// ═══════════════════════════════════════════════════════════
+const PARTICLE_N = 120;
+const particles = [];
+class Particle {
+  constructor() { this.reset(); }
+  reset() {
+    const a = Math.random()*Math.PI*2;
+    const r = R * (0.6 + Math.random()*0.9);
+    this.x = CX + Math.cos(a)*r;
+    this.y = CY + Math.sin(a)*r;
+    this.vx = (Math.random()-0.5)*0.15;
+    this.vy = (Math.random()-0.5)*0.15;
+    this.life = 0.3 + Math.random()*0.7;
+    this.maxLife = this.life;
+    this.size = 0.4 + Math.random()*1.2;
+  }
+  update(amp) {
+    this.life -= 0.003 + amp*0.004;
+    const push = amp * 0.3;
+    const dx = this.x - CX, dy = this.y - CY;
+    const dist = Math.sqrt(dx*dx+dy*dy) || 1;
+    this.vx += (dx/dist)*push*0.02;
+    this.vy += (dy/dist)*push*0.02;
+    this.x += this.vx; this.y += this.vy;
+    if (this.life <= 0) this.reset();
+  }
+  draw(c) {
+    const a = (this.life/this.maxLife)*0.4;
+    c.beginPath();
+    c.arc(this.x, this.y, this.size, 0, Math.PI*2);
+    c.fillStyle = `rgba(0,200,255,${a})`;
+    c.fill();
+  }
+}
+for (let i=0;i<PARTICLE_N;i++) particles.push(new Particle());
+
+// ═══════════════════════════════════════════════════════════
+// DRAWING HELPERS
+// ═══════════════════════════════════════════════════════════
+const TAU = Math.PI * 2;
+
+function strokeRing(r, color, width, alpha) {
+  ctx.beginPath();
+  ctx.arc(CX,CY,r,0,TAU);
+  ctx.strokeStyle = color.replace('A)',`${alpha})`);
+  ctx.lineWidth = width;
+  ctx.stroke();
+}
+
+function glowColor(a) { return `rgba(0,200,255,${a})`; }
+function glowColor3(a){ return `rgba(0,255,255,${a})`; }
+
+// ═══════════════════════════════════════════════════════════
+// RENDER
+// ═══════════════════════════════════════════════════════════
+function render(ts) {
+  const t = ts / 1000;
+  updateAudio();
+
+  ctx.clearRect(0, 0, W, H);
+  CX = W/2; CY = H/2; R = Math.min(W,H)*0.38;
+
+  const amp  = simAmp;
+  const glow = 0.08 + amp * 0.5;
+
+  // ── Background radial gradient ──
+  const bgGrad = ctx.createRadialGradient(CX,CY,R*0.1,CX,CY,R*1.8);
+  bgGrad.addColorStop(0, `rgba(0,60,120,${0.02+amp*0.03})`);
+  bgGrad.addColorStop(0.5,`rgba(0,30,60,${0.01+amp*0.015})`);
+  bgGrad.addColorStop(1, 'transparent');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0,0,W,H);
+
+  // ── Shockwave ──
+  if (shockwave > 0) {
+    const sr = R * 0.3 + shockwave * R * 1.2;
+    ctx.beginPath();
+    ctx.arc(CX,CY,sr,0,TAU);
+    ctx.strokeStyle = `rgba(0,220,255,${shockAlpha*0.3})`;
+    ctx.lineWidth = 2 + (1-shockwave)*3;
+    ctx.stroke();
+  }
+
+  // ── Structural rings ──
+  const rings = [
+    {r:1.40,w:0.3,a:0.03},{r:1.32,w:0.5,a:0.04},{r:1.22,w:0.4,a:0.05},
+    {r:1.12,w:0.3,a:0.04},{r:1.05,w:0.6,a:0.06},{r:0.98,w:1.0,a:0.08},
+    {r:0.90,w:0.5,a:0.06},{r:0.82,w:1.2,a:0.10},{r:0.72,w:0.4,a:0.06},
+    {r:0.62,w:0.8,a:0.08},{r:0.50,w:0.3,a:0.05},{r:0.38,w:0.6,a:0.06},
+    {r:0.28,w:0.3,a:0.04},
+  ];
+  for (const rr of rings) {
+    strokeRing(R*rr.r, 'rgba(0,200,255,A)', rr.w, rr.a + amp*0.08);
+  }
+
+  // ── Rotating segmented arcs ──
+  const arcSets = [
+    {r:1.38,w:2.5,segs:6,gapDeg:8,speed:0.07,dir:1,aBase:0.06},
+    {r:1.28,w:1.8,segs:8,gapDeg:6,speed:-0.05,dir:-1,aBase:0.08},
+    {r:1.15,w:3.0,segs:4,gapDeg:12,speed:0.10,dir:1,aBase:0.07},
+    {r:1.02,w:1.5,segs:12,gapDeg:4,speed:-0.08,dir:-1,aBase:0.09},
+    {r:0.88,w:2.0,segs:6,gapDeg:10,speed:0.06,dir:1,aBase:0.08},
+    {r:0.78,w:1.2,segs:10,gapDeg:5,speed:-0.12,dir:-1,aBase:0.06},
+    {r:0.65,w:2.5,segs:5,gapDeg:8,speed:0.09,dir:1,aBase:0.07},
+    {r:0.52,w:1.0,segs:16,gapDeg:3,speed:-0.15,dir:-1,aBase:0.05},
+  ];
+
+  for (const as of arcSets) {
+    const radius = R * as.r;
+    const totalDeg = 360 / as.segs;
+    const arcDeg = totalDeg - as.gapDeg;
+    const rotOff = t * as.speed * as.dir + (amp * 0.3 * as.dir);
+    const alpha = as.aBase + amp * 0.18;
+    ctx.lineWidth = as.w + amp * 1.5;
+    ctx.strokeStyle = glowColor(alpha);
+    ctx.shadowColor = glowColor(alpha * 0.6);
+    ctx.shadowBlur = 6 + amp * 12;
+    for (let s = 0; s < as.segs; s++) {
+      const startA = (s * totalDeg) * (Math.PI/180) + rotOff;
+      const endA = startA + arcDeg * (Math.PI/180);
+      const vibR = radius + Math.sin(t*12 + s*1.3) * amp * 3;
+      ctx.beginPath();
+      ctx.arc(CX, CY, vibR, startA, endA);
+      ctx.stroke();
+    }
+  }
+  ctx.shadowBlur = 0;
+  ctx.shadowColor = 'transparent';
+
+  // ── Tick marks ──
+  const tickSets = [
+    {r:1.35,len:8,count:72,w:0.5,a:0.06},
+    {r:1.18,len:5,count:120,w:0.3,a:0.04},
+    {r:1.00,len:10,count:36,w:0.8,a:0.08},
+    {r:0.85,len:4,count:90,w:0.4,a:0.05},
+    {r:0.68,len:6,count:60,w:0.5,a:0.06},
+    {r:0.48,len:3,count:48,w:0.3,a:0.04},
+  ];
+  for (const ts2 of tickSets) {
+    const radius = R * ts2.r;
+    for (let i = 0; i < ts2.count; i++) {
+      const a = (i / ts2.count) * TAU;
+      const bandIdx = Math.floor((i / ts2.count) * NUM_BANDS);
+      const bAmp = bands[bandIdx] || 0;
+      const extra = bAmp * 12;
+      const x1 = CX + Math.cos(a) * radius;
+      const y1 = CY + Math.sin(a) * radius;
+      const x2 = CX + Math.cos(a) * (radius + ts2.len + extra);
+      const y2 = CY + Math.sin(a) * (radius + ts2.len + extra);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.strokeStyle = glowColor(ts2.a + bAmp * 0.4);
+      ctx.lineWidth = ts2.w + bAmp * 1.5;
+      ctx.stroke();
+    }
+  }
+
+  // ── Audio-reactive bars ──
+  const barRingR = R * 0.92;
+  const barMaxH = R * 0.18;
+  for (let i = 0; i < NUM_BANDS; i++) {
+    const a = (i / NUM_BANDS) * TAU - Math.PI/2;
+    const bv = bands[i];
+    const bh = bv * barMaxH;
+    if (bh < 0.5) continue;
+    const x1 = CX + Math.cos(a) * barRingR;
+    const y1 = CY + Math.sin(a) * barRingR;
+    const x2 = CX + Math.cos(a) * (barRingR + bh);
+    const y2 = CY + Math.sin(a) * (barRingR + bh);
+    const hue = 190 + (i/NUM_BANDS) * 30;
+    const lum = 50 + bv * 30;
+    const al = 0.3 + bv * 0.7;
+    ctx.beginPath();
+    ctx.moveTo(x1,y1); ctx.lineTo(x2,y2);
+    ctx.strokeStyle = `hsla(${hue},90%,${lum}%,${al})`;
+    ctx.lineWidth = 2.0 + bv * 2;
+    ctx.shadowColor = `hsla(${hue},90%,${lum}%,${al*0.5})`;
+    ctx.shadowBlur = 4 + bv * 10;
+    ctx.stroke();
+  }
+  ctx.shadowBlur = 0;
+  ctx.shadowColor = 'transparent';
+
+  // ── Inner bars ──
+  const innerBarR = R * 0.58;
+  const innerBarMaxH = R * 0.10;
+  for (let i = 0; i < NUM_BANDS; i++) {
+    const a = (i / NUM_BANDS) * TAU - Math.PI/2;
+    const bv = bands[i];
+    const bh = bv * innerBarMaxH;
+    if (bh < 0.3) continue;
+    const x1 = CX + Math.cos(a) * innerBarR;
+    const y1 = CY + Math.sin(a) * innerBarR;
+    const x2 = CX + Math.cos(a) * (innerBarR - bh);
+    const y2 = CY + Math.sin(a) * (innerBarR - bh);
+    ctx.beginPath();
+    ctx.moveTo(x1,y1); ctx.lineTo(x2,y2);
+    ctx.strokeStyle = glowColor(0.15 + bv*0.5);
+    ctx.lineWidth = 1.5 + bv*1.5;
+    ctx.stroke();
+  }
+
+  // ── Waveform ring ──
+  const waveR = R * 0.72;
+  const wavePoints = 180;
+  ctx.beginPath();
+  for (let i = 0; i <= wavePoints; i++) {
+    const a = (i / wavePoints) * TAU;
+    const bi = Math.floor((i / wavePoints) * NUM_BANDS) % NUM_BANDS;
+    const displacement = bands[bi] * R * 0.06;
+    const wobble = Math.sin(t*6 + i*0.12) * amp * 2;
+    const rr = waveR + displacement + wobble;
+    const x = CX + Math.cos(a) * rr;
+    const y = CY + Math.sin(a) * rr;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.strokeStyle = glowColor3(0.12 + amp*0.3);
+  ctx.lineWidth = 1.2 + amp*1.5;
+  ctx.shadowColor = glowColor3(0.2 + amp*0.3);
+  ctx.shadowBlur = 8 + amp*15;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.shadowColor = 'transparent';
+
+  // ── Circuitry lines ──
+  const circuitR = R * 1.08;
+  ctx.lineWidth = 0.6;
+  for (let i = 0; i < 8; i++) {
+    const baseA = (i / 8) * TAU + t * 0.03;
+    const len = R * (0.08 + Math.sin(t*0.5 + i)*0.03);
+    const x1 = CX + Math.cos(baseA) * circuitR;
+    const y1 = CY + Math.sin(baseA) * circuitR;
+    const x2 = CX + Math.cos(baseA) * (circuitR + len);
+    const y2 = CY + Math.sin(baseA) * (circuitR + len);
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2);
+    ctx.strokeStyle = glowColor(0.08 + amp*0.1);
+    ctx.stroke();
+    const branchA = baseA + 0.15;
+    const x3 = x2 + Math.cos(branchA) * len * 0.6;
+    const y3 = y2 + Math.sin(branchA) * len * 0.6;
+    ctx.beginPath(); ctx.moveTo(x2,y2); ctx.lineTo(x3,y3);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x3,y3, 1.5 + amp*1.5, 0, TAU);
+    ctx.fillStyle = glowColor(0.15 + amp*0.25);
+    ctx.fill();
+    const x4 = x3 + Math.cos(baseA - 0.3) * len * 0.4;
+    const y4 = y3 + Math.sin(baseA - 0.3) * len * 0.4;
+    ctx.beginPath(); ctx.moveTo(x3,y3); ctx.lineTo(x4,y4);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x4,y4, 1 + amp, 0, TAU);
+    ctx.fillStyle = glowColor(0.1 + amp*0.15);
+    ctx.fill();
+  }
+
+  // ── Orbit dots ──
+  const orbitSets = [
+    {r:1.30,count:20,size:1.2,speed:0.04,a:0.08},
+    {r:1.10,count:12,size:1.8,speed:-0.06,a:0.10},
+    {r:0.80,count:16,size:1.0,speed:0.08,a:0.07},
+    {r:0.55,count:10,size:1.5,speed:-0.10,a:0.09},
+  ];
+  for (const os of orbitSets) {
+    for (let i = 0; i < os.count; i++) {
+      const a = (i / os.count) * TAU + t * os.speed;
+      const orR = R * os.r + Math.sin(t*3 + i*0.8)*amp*4;
+      const x = CX + Math.cos(a) * orR;
+      const y = CY + Math.sin(a) * orR;
+      ctx.beginPath();
+      ctx.arc(x, y, os.size + amp*1.2, 0, TAU);
+      ctx.fillStyle = glowColor(os.a + amp*0.2);
+      ctx.fill();
+    }
+  }
+
+  // ── Scanning lines ──
+  const scanA = t * 0.5;
+  const scanR1 = R * 0.30;
+  const scanR2 = R * 1.42;
+  const sx1 = CX + Math.cos(scanA) * scanR1;
+  const sy1 = CY + Math.sin(scanA) * scanR1;
+  const sx2 = CX + Math.cos(scanA) * scanR2;
+  const sy2 = CY + Math.sin(scanA) * scanR2;
+  const scanGrad = ctx.createLinearGradient(sx1,sy1,sx2,sy2);
+  scanGrad.addColorStop(0, 'transparent');
+  scanGrad.addColorStop(0.3, glowColor(0.04 + amp*0.06));
+  scanGrad.addColorStop(0.7, glowColor(0.06 + amp*0.08));
+  scanGrad.addColorStop(1, 'transparent');
+  ctx.beginPath(); ctx.moveTo(sx1,sy1); ctx.lineTo(sx2,sy2);
+  ctx.strokeStyle = scanGrad;
+  ctx.lineWidth = 0.8;
+  ctx.stroke();
+
+  // ── Corner UI elements ──
+  const uiDist = R * 1.25;
+  const uiSize = 4 + amp * 3;
+  const uiRot = t * 0.8;
+  for (let q = 0; q < 4; q++) {
+    const qa = (q / 4) * TAU + t * 0.02;
+    const qx = CX + Math.cos(qa) * uiDist;
+    const qy = CY + Math.sin(qa) * uiDist;
+    ctx.save();
+    ctx.translate(qx, qy);
+    ctx.rotate(uiRot + q);
+    ctx.strokeStyle = glowColor(0.12 + amp*0.15);
+    ctx.lineWidth = 0.8;
+    ctx.strokeRect(-uiSize, -uiSize, uiSize*2, uiSize*2);
+    ctx.restore();
+  }
+
+  // ── Crosshair ──
+  const chLen = R * 0.08;
+  const chGap = R * 0.03;
+  ctx.strokeStyle = glowColor(0.06 + amp*0.06);
+  ctx.lineWidth = 0.5;
+  ctx.beginPath(); ctx.moveTo(CX-chLen,CY); ctx.lineTo(CX-chGap,CY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX+chGap,CY); ctx.lineTo(CX+chLen,CY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX,CY-chLen); ctx.lineTo(CX,CY-chGap); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX,CY+chGap); ctx.lineTo(CX,CY+chLen); ctx.stroke();
+
+  // ── Center glow ──
+  const breathR = R * 0.20 + Math.sin(t*1.5)*R*0.02 + amp*R*0.05;
+  const cGrad = ctx.createRadialGradient(CX,CY,0,CX,CY,breathR);
+  cGrad.addColorStop(0, `rgba(0,180,255,${0.03+amp*0.08})`);
+  cGrad.addColorStop(0.5, `rgba(0,120,255,${0.01+amp*0.04})`);
+  cGrad.addColorStop(1, 'transparent');
+  ctx.fillStyle = cGrad;
+  ctx.beginPath(); ctx.arc(CX,CY,breathR,0,TAU); ctx.fill();
+
+  // ── Particles ──
+  for (const p of particles) { p.update(amp); p.draw(ctx); }
+
+  // ── Bloom ──
+  const bloomR = R * 1.5;
+  const bloomGrad = ctx.createRadialGradient(CX,CY,R*0.8,CX,CY,bloomR);
+  bloomGrad.addColorStop(0, `rgba(0,140,255,${0.01+amp*0.03})`);
+  bloomGrad.addColorStop(1, 'transparent');
+  ctx.fillStyle = bloomGrad;
+  ctx.fillRect(0,0,W,H);
+
+  // ── Corner brackets ──
+  drawCornerBrackets(amp, t);
+
+  requestAnimationFrame(render);
+}
+
+function drawCornerBrackets(amp, t) {
+  const margin = 30;
+  const bLen = 35 + amp * 10;
+  ctx.strokeStyle = glowColor(0.07 + amp*0.08);
+  ctx.lineWidth = 1.0;
+
+  ctx.beginPath();
+  ctx.moveTo(margin, margin + bLen);
+  ctx.lineTo(margin, margin);
+  ctx.lineTo(margin + bLen, margin);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(W - margin - bLen, margin);
+  ctx.lineTo(W - margin, margin);
+  ctx.lineTo(W - margin, margin + bLen);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(margin, H - margin - bLen);
+  ctx.lineTo(margin, H - margin);
+  ctx.lineTo(margin + bLen, H - margin);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(W - margin - bLen, H - margin);
+  ctx.lineTo(W - margin, H - margin);
+  ctx.lineTo(W - margin, H - margin - bLen);
+  ctx.stroke();
+
+  // Info text
+  ctx.fillStyle = glowColor(0.06 + amp*0.04);
+  ctx.font = '9px monospace';
+  ctx.fillText('SYS.ACTIVE', margin + 5, margin + bLen + 14);
+  ctx.fillText(`AMP: ${(amp*100).toFixed(0)}%`, W - margin - 65, margin + bLen + 14);
+
+  const tickStr = `FREQ.ANALYSIS :: ${(t*100%1000).toFixed(0).padStart(4,'0')}`;
+  ctx.fillText(tickStr, margin + 5, H - margin - bLen - 6);
+
+  const statusStr = isSpeaking ? 'VOICE.ACTIVE' : 'STANDBY';
+  ctx.fillText(statusStr, W - margin - 75, H - margin - bLen - 6);
+
+  // Honorific indicator in HUD
+  const honStr = `ADDR: ${currentHonorific.toUpperCase()}`;
+  ctx.fillText(honStr, W - margin - 75, H - margin - bLen - 18);
+}
+
+// Idle breathing
+setInterval(() => {
+  if (!isSpeaking && simAmp < 0.05) {
+    simTarget = 0.06;
+    setTimeout(() => { simTarget = 0; }, 250);
+  }
+}, 3500);
+
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
